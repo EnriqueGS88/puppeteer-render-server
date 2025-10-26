@@ -1,0 +1,17 @@
+{
+  "name": "puppeteer-render-server",
+  "version": "1.0.0",
+  "description": "Puppeteer scraper service for Render.com",
+  "main": "server.js",
+  "type": "module",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "puppeteer": "^23.5.0"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  }
+}
