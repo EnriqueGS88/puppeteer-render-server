@@ -5,7 +5,8 @@
   "main": "server.js",
   "type": "module",
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "postinstall": "node node_modules/puppeteer/install.mjs"
   },
   "dependencies": {
     "express": "^4.19.2",
