@@ -3,6 +3,8 @@
 Render.com has specific filesystem permissions
 Without this config, Puppeteer can't find Chromium
 This is the #1 cause of "Browser not found" errors on Render
+
+Original version deployed
 */
 
 import express from 'express';
