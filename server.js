@@ -1,279 +1,305 @@
-
 /*
-Render.com has specific filesystem permissions
+Improved version by Lovable
 Without this config, Puppeteer can't find Chromium
 This is the #1 cause of "Browser not found" errors on Render
-
-Original version deployed
 */
+
 
 import express from 'express';
 import puppeteer from 'puppeteer';
 
 const app = express();
+app.use(express.json());
+
 const PORT = process.env.PORT || 10000;
 
-// Middleware
-app.use(express.json({ limit: '10mb' }));
-app.use(express.urlencoded({ extended: true, limit: '10mb' }));
+// Configuration
+const INGEST_JOB_URL = process.env.INGEST_JOB_URL;
+const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
+const API_SECRET = process.env.API_SECRET;
 
-// Environment variables
-const SUPABASE_EDGE_FUNCTION_URL = process.env.SUPABASE_RESULT_URL;
-const SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY;
-const API_SECRET = process.env.API_SECRET; // Security token
+// Validate environment variables
+if (!INGEST_JOB_URL || !SUPABASE_SERVICE_ROLE_KEY) {
+  console.error('⚠️ Missing required environment variables!');
+  console.error('Required: INGEST_JOB_URL, SUPABASE_SERVICE_ROLE_KEY');
+  process.exit(1);
+}
+
+// Simple auth middleware
+function validateApiSecret(req, res, next) {
+  const secret = req.headers['x-api-secret'];
+  
+  if (!API_SECRET) {
+    console.warn('⚠️ API_SECRET not set - skipping auth');
+    return next();
+  }
+  
+  if (secret !== API_SECRET) {
+    console.error('❌ Invalid API secret');
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+  
+  next();
+}
 
 // Health check endpoint
-app.get('/', (req, res) => {
+app.get('/health', (req, res) => {
   res.json({ 
-    status: 'online', 
-    service: 'Puppeteer Scraper',
-    timestamp: new Date().toISOString()
+    status: 'healthy',
+    timestamp: new Date().toISOString(),
+    config: {
+      ingestJobUrl: !!INGEST_JOB_URL,
+      serviceRoleKey: !!SUPABASE_SERVICE_ROLE_KEY,
+      apiSecret: !!API_SECRET
+    }
   });
 });
 
-// Main scraping endpoint - receives URL from Supabase Edge Function
-app.post('/scrape', async (req, res) => {
-  const startTime = Date.now();
-  
+// Main scraping endpoint
+app.post('/scrape', validateApiSecret, async (req, res) => {
+  const { url, user_id } = req.body;
+
+  console.log(`\n📥 Scrape request received:`);
+  console.log(`  URL: ${url}`);
+  console.log(`  User ID: ${user_id}`);
+
+  if (!url || !user_id) {
+    return res.status(400).json({ 
+      error: 'Missing required fields: url and user_id' 
+    });
+  }
+
   try {
-    // Verify API secret for security
-    const providedSecret = req.headers['x-api-secret'];
-    if (providedSecret !== API_SECRET) {
-      console.error('Unauthorized request - invalid API secret');
-      return res.status(401).json({ error: 'Unauthorized' });
-    }
-
-    // Extract data from request body
-    const { url, telegram_user_id, options = {} } = req.body;
-
-    // Validate URL
-    if (!url || !isValidUrl(url)) {
-      console.error('Invalid URL provided:', url);
-      return res.status(400).json({ error: 'Invalid or missing URL' });
-    }
-
-    console.log(`[${new Date().toISOString()}] Scraping request received for: ${url}`);
-
-    // Respond immediately to Supabase (don't make it wait)
-    res.status(202).json({ 
-      status: 'accepted', 
-      message: 'Scraping started',
-      url: url
+    // Scrape the LinkedIn page
+    console.log(`🚀 Launching Puppeteer...`);
+    const jobData = await scrapePage(url, user_id);
+    
+    console.log(`✅ Scraping completed successfully`);
+    res.json({
+      success: true,
+      message: 'Job scraped and ingested successfully',
+      jobData: jobData
     });
 
-    // Run scraping asynchronously
-    scrapePage(url, telegram_user_id, options, startTime)
-      .catch(error => {
-        console.error('Scraping error:', error);
-        // Even if scraping fails, send error details to Supabase
-        sendResultsToSupabase({
-          url,
-          telegram_user_id,
-          error: error.message,
-          success: false,
-          timestamp: new Date().toISOString()
-        });
-      });
-
   } catch (error) {
-    console.error('Request handling error:', error);
-    res.status(500).json({ error: 'Internal server error' });
+    console.error('❌ Scraping error:', error.message);
+    res.status(500).json({
+      error: error.message,
+      details: error.stack
+    });
   }
 });
 
-// Puppeteer scraping function
-async function scrapePage(url, telegram_user_id, options = {}, startTime) {
-  console.log(`Starting Puppeteer for: ${url}`);
-  
+// Core scraping logic
+async function scrapePage(url, user_id) {
   let browser;
+  
   try {
-    // Launch browser with Render-optimized settings
+    console.log(`🌐 Opening browser for: ${url}`);
+    
     browser = await puppeteer.launch({
       headless: true,
       args: [
         '--no-sandbox',
         '--disable-setuid-sandbox',
         '--disable-dev-shm-usage',
+        '--disable-accelerated-2d-canvas',
         '--disable-gpu',
-        '--no-first-run',
-        '--no-zygote',
-        '--single-process',
-        '--disable-extensions',
-        '--disable-background-networking',
-        '--disable-default-apps',
-        '--disable-sync',
-        '--mute-audio'
+        '--window-size=1920x1080'
       ],
       executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined
     });
 
     const page = await browser.newPage();
     
-    // Set viewport
-    await page.setViewport({ 
-      width: options.viewport?.width || 1920, 
-      height: options.viewport?.height || 1080 
+    await page.setViewport({ width: 1920, height: 1080 });
+    await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
+
+    console.log(`📄 Navigating to URL...`);
+    await page.goto(url, {
+      waitUntil: 'networkidle2',
+      timeout: 30000
     });
 
-    // Set user agent
-    await page.setUserAgent(
-      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-    );
-
-    // Navigate to URL
-    console.log(`Navigating to ${url}...`);
-    await page.goto(url, { 
-      waitUntil: options.waitUntil || 'networkidle2', 
-      timeout: options.timeout || 30000 
-    });
-
-    console.log('Page loaded, extracting data...');
-
-    // ========================================
-    // CUSTOMIZE THIS SECTION FOR YOUR SCRAPING
-    // ========================================
+    console.log(`🔍 Extracting LinkedIn job data...`);
+    
+    // Extract LinkedIn-specific job data
     const scrapedData = await page.evaluate(() => {
-      // Extract page title
-      const title = document.querySelector('h1')?.innerText || 
-                    document.querySelector('title')?.innerText || 
-                    'No title found';
-      
-      // Extract meta description
-      const description = document.querySelector('meta[name="description"]')?.content || 
-                         document.querySelector('meta[property="og:description"]')?.content || 
-                         'No description found';
-      
-      // Extract all headings
-      const headings = Array.from(document.querySelectorAll('h1, h2, h3, h4'))
-        .map(h => ({
-          tag: h.tagName.toLowerCase(),
-          text: h.innerText.trim()
-        }))
-        .filter(h => h.text.length > 0);
-      
-      // Extract links
-      const links = Array.from(document.querySelectorAll('a'))
-        .map(a => ({
-          text: a.innerText.trim(),
-          href: a.href
-        }))
-        .filter(l => l.href && l.href.startsWith('http'))
-        .slice(0, 50); // Limit to 50 links
-      
-      // Extract images
-      const images = Array.from(document.querySelectorAll('img'))
-        .map(img => ({
-          src: img.src,
-          alt: img.alt || ''
-        }))
-        .filter(img => img.src)
-        .slice(0, 20); // Limit to 20 images
+      // Helper function to get text content safely
+      const getText = (selector) => {
+        const el = document.querySelector(selector);
+        return el ? el.innerText.trim() : null;
+      };
 
-      // Get page text content (first 5000 characters)
-      const bodyText = document.body?.innerText?.substring(0, 5000) || '';
+      // Extract job title
+      const title = getText('.top-card-layout__title') || 
+                    getText('h1.topcard__title') || 
+                    getText('h1') || 
+                    null;
+
+      // Extract company name
+      const company = getText('.topcard__org-name-link') || 
+                      getText('.top-card-layout__second-subline a') ||
+                      getText('.topcard__flavor--black-link') ||
+                      null;
+
+      // Extract location
+      const location = getText('.topcard__flavor--bullet') || 
+                       getText('.top-card-layout__second-subline span') ||
+                       null;
+
+      // Extract employment type & seniority from criteria
+      const criteriaItems = Array.from(document.querySelectorAll('.description__job-criteria-item'));
+      let employment_type = null;
+      let seniority = null;
+
+      criteriaItems.forEach(item => {
+        const subheader = item.querySelector('.description__job-criteria-subheader')?.innerText?.trim();
+        const text = item.querySelector('.description__job-criteria-text')?.innerText?.trim();
+        
+        if (subheader?.includes('Employment type')) {
+          employment_type = text;
+        }
+        if (subheader?.includes('Seniority level')) {
+          seniority = text;
+        }
+      });
+
+      // Extract full job description
+      const description = getText('.show-more-less-html__markup') || 
+                          getText('.description__text') ||
+                          getText('.core-section-container__content') ||
+                          document.body.innerText.substring(0, 5000);
+
+      // Extract skills (if visible)
+      const skills = Array.from(document.querySelectorAll('.job-details-skill-match-status-item__skill-item'))
+        .map(el => el.innerText.trim())
+        .filter(Boolean);
+
+      // Extract LinkedIn job ID from URL
+      const jobIdMatch = window.location.href.match(/\/jobs\/view\/(\d+)/);
+      const external_id = jobIdMatch ? jobIdMatch[1] : null;
+
+      // Extract posted date
+      const postedText = getText('.topcard__flavor--metadata');
+      let posted_at = null;
+      if (postedText) {
+        const match = postedText.match(/(\d+)\s+(day|hour|week|month)s?\s+ago/i);
+        if (match) {
+          const amount = parseInt(match[1]);
+          const unit = match[2].toLowerCase();
+          const now = new Date();
+          
+          if (unit === 'day') now.setDate(now.getDate() - amount);
+          else if (unit === 'hour') now.setHours(now.getHours() - amount);
+          else if (unit === 'week') now.setDate(now.getDate() - (amount * 7));
+          else if (unit === 'month') now.setMonth(now.getMonth() - amount);
+          
+          posted_at = now.toISOString();
+        }
+      }
 
       return {
         title,
+        company,
+        location,
+        employment_type,
+        seniority,
         description,
-        headings,
-        links,
-        images,
-        bodyText,
-        url: window.location.href,
-        scrapedAt: new Date().toISOString()
+        skills: skills.length > 0 ? skills : null,
+        external_id,
+        posted_at,
+        url: window.location.href
       };
     });
 
-    await browser.close();
-    browser = null;
+    console.log(`📊 Extracted data:`, {
+      title: scrapedData.title,
+      company: scrapedData.company,
+      location: scrapedData.location,
+      external_id: scrapedData.external_id
+    });
 
-    const scrapingDuration = Date.now() - startTime;
-    console.log(`Scraping completed in ${scrapingDuration}ms`);
+    // Validate required fields
+    if (!scrapedData.title) {
+      throw new Error('Failed to extract job title from page');
+    }
 
-    // Prepare result payload
-    const resultPayload = {
-      url,
-      telegram_user_id,
-      success: true,
-      data: scrapedData,
-      metadata: {
-        scraping_duration_ms: scrapingDuration,
-        timestamp: new Date().toISOString()
-      }
+    // Format job data for ingest-job
+    const jobData = {
+      source: 'linkedin',
+      external_id: scrapedData.external_id,
+      title: scrapedData.title,
+      company: scrapedData.company,
+      location: scrapedData.location,
+      employment_type: scrapedData.employment_type,
+      seniority: scrapedData.seniority,
+      url: url,
+      description: scrapedData.description,
+      skills: scrapedData.skills || [],
+      posted_at: scrapedData.posted_at,
+      user_id: user_id // Include user_id for service role auth
     };
 
-    // Send results to Supabase Edge Function #2
-    await sendResultsToSupabase(resultPayload);
+    // Send to ingest-job
+    console.log(`📤 Sending to ingest-job...`);
+    await sendToIngestJob(jobData);
 
-    console.log('Results sent to Supabase successfully');
+    return jobData;
 
   } catch (error) {
-    console.error('Scraping error:', error.message);
+    console.error('Scraping error:', error);
     throw error;
   } finally {
     if (browser) {
-      await browser.close().catch(e => console.error('Browser close error:', e));
+      await browser.close();
+      console.log(`🔒 Browser closed`);
     }
   }
 }
 
-// Send results back to Supabase Edge Function
-async function sendResultsToSupabase(payload) {
-  if (!SUPABASE_EDGE_FUNCTION_URL) {
-    console.error('SUPABASE_RESULT_URL not configured');
-    return;
+// Send scraped data to ingest-job edge function
+async function sendToIngestJob(jobData) {
+  if (!INGEST_JOB_URL) {
+    throw new Error('INGEST_JOB_URL not configured');
   }
 
   try {
-    console.log(`Sending results to Supabase: ${SUPABASE_EDGE_FUNCTION_URL}`);
+    console.log(`🎯 Calling ingest-job: ${INGEST_JOB_URL}`);
     
-    const response = await fetch(SUPABASE_EDGE_FUNCTION_URL, {
+    const response = await fetch(INGEST_JOB_URL, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'Authorization': `Bearer ${SUPABASE_ANON_KEY}`
+        'Authorization': `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`,
+        'apikey': SUPABASE_SERVICE_ROLE_KEY
       },
-      body: JSON.stringify(payload)
+      body: JSON.stringify(jobData)
     });
 
     if (!response.ok) {
       const errorText = await response.text();
-      console.error(`Supabase Edge Function error: ${response.status} - ${errorText}`);
-      throw new Error(`Failed to send results: ${response.status}`);
+      console.error(`❌ ingest-job error: ${response.status} - ${errorText}`);
+      throw new Error(`Failed to ingest job: ${response.status} - ${errorText}`);
     }
 
-    const result = await response.json().catch(() => ({}));
-    console.log('Supabase response:', result);
+    const result = await response.json();
+    console.log('✅ ingest-job response:', result);
+    
+    return result;
 
   } catch (error) {
-    console.error('Error sending to Supabase:', error.message);
-    // Don't throw - we don't want to crash the server if Supabase is down
+    console.error('Error sending to ingest-job:', error.message);
+    throw error;
   }
 }
-
-// URL validation helper
-function isValidUrl(string) {
-  try {
-    const url = new URL(string);
-    return url.protocol === 'http:' || url.protocol === 'https:';
-  } catch (_) {
-    return false;
-  }
-}
-
-// Error handling
-process.on('unhandledRejection', (error) => {
-  console.error('Unhandled promise rejection:', error);
-});
-
-process.on('uncaughtException', (error) => {
-  console.error('Uncaught exception:', error);
-  process.exit(1);
-});
 
 // Start server
-app.listen(PORT, '0.0.0.0', () => {
-  console.log(`✅ Puppeteer server running on port ${PORT}`);
-  console.log(`Environment: ${process.env.NODE_ENV || 'development'}`);
-  console.log(`Supabase URL configured: ${!!SUPABASE_EDGE_FUNCTION_URL}`);
+app.listen(PORT, () => {
+  console.log(`\n🚀 LinkedIn Scraper Server`);
+  console.log(`📍 Port: ${PORT}`);
+  console.log(`🔗 Ingest Job URL: ${INGEST_JOB_URL}`);
+  console.log(`🔐 Service Role Key: ${SUPABASE_SERVICE_ROLE_KEY ? '✓ Set' : '✗ Missing'}`);
+  console.log(`🔑 API Secret: ${API_SECRET ? '✓ Set' : '⚠️ Not set (auth disabled)'}`);
+  console.log(`\n✅ Server ready!\n`);
 });
