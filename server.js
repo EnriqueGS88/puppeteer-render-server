@@ -78,7 +78,8 @@ app.post('/scrape', validateApiSecret, async (req, res) => {
     res.json({
       success: true,
       message: 'Job scraped and ingested successfully',
-      jobData: jobData
+      jobData: jobData.jobData || jobData,
+      job: jobData.job
     });
 
   } catch (error) {
@@ -243,9 +244,12 @@ async function scrapePage(url, user_id) {
 
     // Send to ingest-job
     console.log(`📤 Sending to ingest-job...`);
-    await sendToIngestJob(jobData);
+    const ingestResult = await sendToIngestJob(jobData);
 
-    return jobData;
+    return {
+      ...jobData,
+      job: ingestResult.job
+    };
 
   } catch (error) {
     console.error('Scraping error:', error);
