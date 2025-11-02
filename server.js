@@ -1,3 +1,6 @@
+// bulk scrape
+// locations and keywords sent as parameters
+
 import express from 'express';
 import puppeteer from 'puppeteer';
 
@@ -40,12 +43,6 @@ function validateApiSecret(req, res, next) {
 // ============================================================================
 
 const BULK_SCRAPE_CONFIG = {
-  locations: {
-    "Dubai": 106204383,
-    // "Bern": 104691271,
-    // "London": 90009496,
-  },
-  keywords: ["Product Manager"],
   timeFilter: "r7200", // Past 7 days
   baseUrl: "https://www.linkedin.com/jobs/search/"
 };
@@ -106,6 +103,27 @@ app.get('/health', (req, res) => {
 
 app.post('/bulk-scrape', validateApiSecret, async (req, res) => {
   console.log(`\n📦 Bulk scrape request received`);
+  
+  // Extract parameters from request body (REQUIRED)
+  const { keywords, locations } = req.body || {};
+  
+  // Validate required parameters
+  if (!keywords || keywords.length === 0) {
+    return res.status(400).json({ 
+      error: 'Missing required parameter: keywords (must be non-empty array)' 
+    });
+  }
+  
+  if (!locations || Object.keys(locations).length === 0) {
+    return res.status(400).json({ 
+      error: 'Missing required parameter: locations (must be non-empty object)' 
+    });
+  }
+  
+  console.log('🔍 Search parameters:', { 
+    keywords, 
+    locations: Object.keys(locations) 
+  });
 
   let browser;
   const allScrapedJobs = [];
@@ -132,8 +150,8 @@ app.post('/bulk-scrape', validateApiSecret, async (req, res) => {
     await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
 
     // Loop through locations × keywords
-    for (const keyword of BULK_SCRAPE_CONFIG.keywords) {
-      for (const [locationName, geoId] of Object.entries(BULK_SCRAPE_CONFIG.locations)) {
+    for (const keyword of keywords) {
+      for (const [locationName, geoId] of Object.entries(locations)) {
         try {
           console.log(`\n🔄 Scraping: "${keyword}" in ${locationName}...`);
           
