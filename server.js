@@ -41,12 +41,12 @@ function validateApiSecret(req, res, next) {
 
 const BULK_SCRAPE_CONFIG = {
   locations: {
-    "Dubai": 106204383,
-    "Bern": 104691271,
+    // "Dubai": 106204383,
+    // "Bern": 104691271,
     "London": 90009496,
   },
   keywords: ["Product Manager"],
-  timeFilter: "r604800", // Past 7 days
+  timeFilter: "r7200", // Past 7 days
   baseUrl: "https://www.linkedin.com/jobs/search/"
 };
 
