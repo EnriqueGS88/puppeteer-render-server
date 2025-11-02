@@ -41,12 +41,12 @@ function validateApiSecret(req, res, next) {
 
 const BULK_SCRAPE_CONFIG = {
   locations: {
-    // "Dubai": 106204383,
-    // "Bern": 104691271,
+    "Dubai": 106204383,
+    "Bern": 104691271,
     "London": 90009496,
   },
   keywords: ["Product Manager"],
-  timeFilter: "r7200", // Past 7 days
+  timeFilter: "r604800", // Past 7 days
   baseUrl: "https://www.linkedin.com/jobs/search/"
 };
 
@@ -263,10 +263,24 @@ app.post('/bulk-scrape', validateApiSecret, async (req, res) => {
     console.log(`   Total jobs scraped: ${allScrapedJobs.length}`);
     console.log(`   Errors: ${errors.length}`);
 
+    // POST scraped jobs to Supabase
+    let ingestResult = null;
+    if (allScrapedJobs.length > 0) {
+      try {
+        ingestResult = await sendBulkJobsToSupabase(allScrapedJobs);
+      } catch (ingestError) {
+        console.error(`❌ Failed to send jobs to Supabase: ${ingestError.message}`);
+        errors.push({
+          type: 'ingest',
+          error: ingestError.message
+        });
+      }
+    }
+
     res.json({
       success: true,
       total_scraped: allScrapedJobs.length,
-      jobs: allScrapedJobs,
+      inserted: ingestResult?.inserted || 0,
       errors: errors.length > 0 ? errors : undefined
     });
 
@@ -491,6 +505,41 @@ async function scrapePage(url, user_id) {
       await browser.close();
       console.log(`🔒 Browser closed`);
     }
+  }
+}
+
+// Send bulk scraped jobs to ingest-scraped-jobs edge function
+async function sendBulkJobsToSupabase(jobs) {
+  const BULK_INGEST_URL = INGEST_JOB_URL.replace('/ingest-job', '/ingest-scraped-jobs');
+  
+  try {
+    console.log(`📤 Posting ${jobs.length} jobs to Supabase edge function...`);
+    console.log(`🎯 URL: ${BULK_INGEST_URL}`);
+    
+    const response = await fetch(BULK_INGEST_URL, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`,
+        'apikey': SUPABASE_SERVICE_ROLE_KEY
+      },
+      body: JSON.stringify({ jobs })
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      console.error(`❌ Bulk ingest error: ${response.status} - ${errorText}`);
+      throw new Error(`Failed to ingest jobs: ${response.status} - ${errorText}`);
+    }
+
+    const result = await response.json();
+    console.log(`✅ Successfully posted ${jobs.length} jobs to Supabase`);
+    console.log(`   Inserted: ${result.inserted || 0}`);
+    return result;
+
+  } catch (error) {
+    console.error('Error sending bulk jobs to Supabase:', error.message);
+    throw error;
   }
 }
 
