@@ -150,7 +150,7 @@ app.post('/bulk-scrape', validateApiSecret, async (req, res) => {
             const popupDismissButton = await page.waitForSelector('.contextual-sign-in-modal__modal-dismiss-icon', { timeout: 3000 });
             if (popupDismissButton) {
               await popupDismissButton.click();
-              await page.waitForTimeout(1000);
+              await new Promise(resolve => setTimeout(resolve, 1000));
             }
           } catch (error) {
             // No popup, continue
@@ -246,7 +246,7 @@ app.post('/bulk-scrape', validateApiSecret, async (req, res) => {
           });
 
           // Delay between requests to avoid rate limiting
-          await page.waitForTimeout(5000);
+          await new Promise(resolve => setTimeout(resolve, 5000));
 
         } catch (error) {
           console.error(`❌ Error scraping "${keyword}" in ${locationName}:`, error.message);
