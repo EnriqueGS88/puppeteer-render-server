@@ -41,9 +41,9 @@ function validateApiSecret(req, res, next) {
 
 const BULK_SCRAPE_CONFIG = {
   locations: {
-    // "Dubai": 106204383,
+    "Dubai": 106204383,
     // "Bern": 104691271,
-    "London": 90009496,
+    // "London": 90009496,
   },
   keywords: ["Product Manager"],
   timeFilter: "r7200", // Past 7 days
