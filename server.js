@@ -1,5 +1,5 @@
-// bulk scrape
-// locations and keywords sent as parameters
+// bulk scrape with locations and keywords as params
+// notifies telegram bot about errors
 
 import express from 'express';
 import puppeteer from 'puppeteer';
@@ -43,7 +43,7 @@ function validateApiSecret(req, res, next) {
 // ============================================================================
 
 const BULK_SCRAPE_CONFIG = {
-  timeFilter: "r7200", // Past 7 days
+  timeFilter: "r604800", // Past 7 days
   baseUrl: "https://www.linkedin.com/jobs/search/"
 };
 
@@ -304,6 +304,14 @@ app.post('/bulk-scrape', validateApiSecret, async (req, res) => {
 
   } catch (error) {
     console.error('❌ Bulk scraping error:', error.message);
+    
+    // Send Telegram error alert
+    const errorInfo = `Keywords: ${JSON.stringify(keywords)}\nLocations: ${JSON.stringify(locationIds || Object.keys(locations))}`;
+    await sendErrorAlert(
+      `/bulk-scrape endpoint - ${errorInfo}`,
+      `${error.message}\n\nStack: ${error.stack?.substring(0, 500)}`
+    );
+    
     res.status(500).json({
       error: error.message,
       details: error.stack
@@ -348,6 +356,13 @@ app.post('/scrape', validateApiSecret, async (req, res) => {
 
   } catch (error) {
     console.error('❌ Scraping error:', error.message);
+    
+    // Send Telegram error alert
+    await sendErrorAlert(
+      `/scrape endpoint - URL: ${url}`,
+      `${error.message}\n\nStack: ${error.stack?.substring(0, 500)}`
+    );
+    
     res.status(500).json({
       error: error.message,
       details: error.stack
@@ -594,6 +609,49 @@ async function sendToIngestJob(jobData) {
   } catch (error) {
     console.error('Error sending to ingest-job:', error.message);
     throw error;
+  }
+}
+
+// Send error notifications to admin Telegram bot
+async function sendErrorAlert(errorContext, errorDetails) {
+  const ERROR_BOT_TOKEN = process.env.ERROR_ALERT_BOT_TOKEN;
+  const ERROR_CHAT_ID = process.env.ERROR_ALERT_CHAT_ID;
+  
+  if (!ERROR_BOT_TOKEN || !ERROR_CHAT_ID) {
+    console.warn('⚠️ Error alerts not configured (missing ERROR_ALERT_BOT_TOKEN or ERROR_ALERT_CHAT_ID)');
+    return;
+  }
+  
+  try {
+    const timestamp = new Date().toISOString();
+    const message = `
+🚨 *Scraping Error Alert*
+
+⏰ Time: ${timestamp}
+📍 Context: ${errorContext}
+
+❌ Error Details:
+\`\`\`
+${errorDetails}
+\`\`\`
+
+🔗 Check logs: https://dashboard.render.com
+    `.trim();
+    
+    await fetch(`https://api.telegram.org/bot${ERROR_BOT_TOKEN}/sendMessage`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        chat_id: ERROR_CHAT_ID,
+        text: message,
+        parse_mode: 'Markdown',
+      }),
+    });
+    
+    console.log('✅ Error alert sent to Telegram');
+  } catch (telegramError) {
+    console.error('❌ Failed to send Telegram error alert:', telegramError.message);
+    // Don't throw - we don't want error notification to break the main flow
   }
 }
 
