@@ -1,6 +1,3 @@
-// bulk scrape with locations and keywords as params
-// notifies telegram bot about errors
-
 import express from 'express';
 import puppeteer from 'puppeteer';
 
@@ -43,7 +40,7 @@ function validateApiSecret(req, res, next) {
 // ============================================================================
 
 const BULK_SCRAPE_CONFIG = {
-  timeFilter: "r7200", // Past 2 HOURS
+  timeFilter: "r604800", // Past 7 days
   baseUrl: "https://www.linkedin.com/jobs/search/"
 };
 
@@ -126,7 +123,8 @@ app.post('/bulk-scrape', validateApiSecret, async (req, res) => {
   });
 
   let browser;
-  const allScrapedJobs = [];
+  let totalScraped = 0;
+  let totalInserted = 0;
   const errors = [];
 
   try {
@@ -250,18 +248,36 @@ app.post('/bulk-scrape', validateApiSecret, async (req, res) => {
           console.log(`   ✅ Scraped ${jobs.length} jobs`);
 
           // Add metadata to each job
-          jobs.forEach(job => {
-            allScrapedJobs.push({
-              ...job,
-              scrape_metadata: {
-                keyword: keyword,
+          const jobsWithMetadata = jobs.map(job => ({
+            ...job,
+            scrape_metadata: {
+              keyword: keyword,
+              location: locationName,
+              geoId: geoId,
+              timeFilter: BULK_SCRAPE_CONFIG.timeFilter,
+              scraped_at: new Date().toISOString()
+            }
+          }));
+
+          totalScraped += jobsWithMetadata.length;
+
+          // POST jobs immediately after scraping this location
+          if (jobsWithMetadata.length > 0) {
+            try {
+              console.log(`   📤 Sending ${jobsWithMetadata.length} jobs to Supabase...`);
+              const ingestResult = await sendBulkJobsToSupabase(jobsWithMetadata);
+              totalInserted += ingestResult?.inserted || 0;
+              console.log(`   ✅ Inserted: ${ingestResult?.inserted || 0}`);
+            } catch (ingestError) {
+              console.error(`   ❌ Failed to ingest jobs for ${locationName}: ${ingestError.message}`);
+              errors.push({
+                keyword,
                 location: locationName,
-                geoId: geoId,
-                timeFilter: BULK_SCRAPE_CONFIG.timeFilter,
-                scraped_at: new Date().toISOString()
-              }
-            });
-          });
+                type: 'ingest',
+                error: ingestError.message
+              });
+            }
+          }
 
           // Delay between requests to avoid rate limiting
           await new Promise(resolve => setTimeout(resolve, 5000));
@@ -278,27 +294,14 @@ app.post('/bulk-scrape', validateApiSecret, async (req, res) => {
     }
 
     console.log(`\n✅ Bulk scraping completed`);
-    console.log(`   Total jobs scraped: ${allScrapedJobs.length}`);
+    console.log(`   Total jobs scraped: ${totalScraped}`);
+    console.log(`   Total jobs inserted: ${totalInserted}`);
     console.log(`   Errors: ${errors.length}`);
-
-    // POST scraped jobs to Supabase
-    let ingestResult = null;
-    if (allScrapedJobs.length > 0) {
-      try {
-        ingestResult = await sendBulkJobsToSupabase(allScrapedJobs);
-      } catch (ingestError) {
-        console.error(`❌ Failed to send jobs to Supabase: ${ingestError.message}`);
-        errors.push({
-          type: 'ingest',
-          error: ingestError.message
-        });
-      }
-    }
 
     res.json({
       success: true,
-      total_scraped: allScrapedJobs.length,
-      inserted: ingestResult?.inserted || 0,
+      total_scraped: totalScraped,
+      inserted: totalInserted,
       errors: errors.length > 0 ? errors : undefined
     });
 
