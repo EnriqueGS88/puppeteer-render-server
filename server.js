@@ -156,7 +156,7 @@ app.post('/bulk-scrape', validateApiSecret, async (req, res) => {
         '--disable-extensions',
         '--no-first-run',
         '--no-zygote',  // Critical for low memory
-        '--single-process',  // Run in single process (saves ~100MB)
+        // '--single-process',  // Run in single process (saves ~100MB)
         '--disable-background-networking',
         '--disable-default-apps',
         '--disable-sync',
