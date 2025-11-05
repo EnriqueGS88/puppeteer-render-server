@@ -1,3 +1,7 @@
+// Post scraped data after each Location
+// Disabled services on Puppeteer Browser to reduce Mem consumption
+
+
 import express from 'express';
 import puppeteer from 'puppeteer';
 
@@ -129,6 +133,15 @@ app.post('/bulk-scrape', validateApiSecret, async (req, res) => {
 
   try {
     console.log(`🚀 Launching Puppeteer for bulk scraping...`);
+    console.log(`📊 Initial memory: ${Math.round(process.memoryUsage().heapUsed / 1024 / 1024)}MB / ${Math.round(process.memoryUsage().rss / 1024 / 1024)}MB RSS`);
+    
+    // Force garbage collection if available
+    if (global.gc) {
+      console.log(`🧹 Running garbage collection...`);
+      global.gc();
+    }
+    
+    console.log(`📊 Memory before launch: ${Math.round(process.memoryUsage().heapUsed / 1024 / 1024)}MB`);
     
     browser = await puppeteer.launch({
       headless: true,
@@ -138,13 +151,32 @@ app.post('/bulk-scrape', validateApiSecret, async (req, res) => {
         '--disable-dev-shm-usage',
         '--disable-accelerated-2d-canvas',
         '--disable-gpu',
-        '--window-size=1920x1080'
+        '--disable-software-rasterizer',
+        '--disable-dev-tools',
+        '--disable-extensions',
+        '--no-first-run',
+        '--no-zygote',  // Critical for low memory
+        '--single-process',  // Run in single process (saves ~100MB)
+        '--disable-background-networking',
+        '--disable-default-apps',
+        '--disable-sync',
+        '--metrics-recording-only',
+        '--mute-audio',
+        '--no-default-browser-check',
+        '--disable-background-timer-throttling',
+        '--disable-backgrounding-occluded-windows',
+        '--disable-renderer-backgrounding',
+        '--window-size=1280,720'  // Smaller viewport = less memory
       ],
-      executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined
+      executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined,
+      timeout: 60000  // 60 second timeout for launch
     });
 
+    console.log(`✅ Puppeteer launched successfully`);
+    console.log(`📊 Memory after launch: ${Math.round(process.memoryUsage().heapUsed / 1024 / 1024)}MB`);
+
     const page = await browser.newPage();
-    await page.setViewport({ width: 1920, height: 1080 });
+    await page.setViewport({ width: 1280, height: 720 });  // Match new window size
     await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
 
     // Loop through locations × keywords
@@ -306,13 +338,18 @@ app.post('/bulk-scrape', validateApiSecret, async (req, res) => {
     });
 
   } catch (error) {
+    const memoryUsage = Math.round(process.memoryUsage().heapUsed / 1024 / 1024);
     console.error('❌ Bulk scraping error:', error.message);
+    console.error(`📊 Memory at crash: ${memoryUsage}MB`);
     
-    // Send Telegram error alert
-    const errorInfo = `Keywords: ${JSON.stringify(keywords)}\nLocations: ${JSON.stringify(locationIds || Object.keys(locations))}`;
+    // Enhanced error context for debugging
+    const errorContext = error.message.includes('launch') 
+      ? `Browser launch failed (Memory: ${memoryUsage}MB)`
+      : `/bulk-scrape endpoint - Keywords: ${JSON.stringify(keywords)}, Locations: ${JSON.stringify(locationIds || Object.keys(locations))}`;
+    
     await sendErrorAlert(
-      `/bulk-scrape endpoint - ${errorInfo}`,
-      `${error.message}\n\nStack: ${error.stack?.substring(0, 500)}`
+      errorContext,
+      `${error.message}\n\nMemory: ${memoryUsage}MB\n\nStack: ${error.stack?.substring(0, 500)}`
     );
     
     res.status(500).json({
