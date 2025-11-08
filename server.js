@@ -1,3 +1,6 @@
+// Post scraped data after every iteration
+// Optimized to reduce memory usage
+
 import express from 'express';
 import puppeteer from 'puppeteer';
 
@@ -40,7 +43,7 @@ function validateApiSecret(req, res, next) {
 // ============================================================================
 
 const BULK_SCRAPE_CONFIG = {
-  timeFilter: "r7200", // Past 7 days
+  timeFilter: "r604800", // Past 7 days
   baseUrl: "https://www.linkedin.com/jobs/search/"
 };
 
@@ -129,6 +132,15 @@ app.post('/bulk-scrape', validateApiSecret, async (req, res) => {
 
   try {
     console.log(`🚀 Launching Puppeteer for bulk scraping...`);
+    console.log(`📊 Initial memory: ${Math.round(process.memoryUsage().heapUsed / 1024 / 1024)}MB / ${Math.round(process.memoryUsage().rss / 1024 / 1024)}MB RSS`);
+    
+    // Force garbage collection if available
+    if (global.gc) {
+      console.log(`🧹 Running garbage collection...`);
+      global.gc();
+    }
+    
+    console.log(`📊 Memory before launch: ${Math.round(process.memoryUsage().heapUsed / 1024 / 1024)}MB`);
     
     browser = await puppeteer.launch({
       headless: true,
@@ -138,28 +150,77 @@ app.post('/bulk-scrape', validateApiSecret, async (req, res) => {
         '--disable-dev-shm-usage',
         '--disable-accelerated-2d-canvas',
         '--disable-gpu',
-        '--window-size=1920x1080'
+        '--disable-software-rasterizer',
+        '--disable-dev-tools',
+        '--disable-extensions',
+        '--no-first-run',
+        '--no-zygote',  // Critical for low memory
+        '--single-process',  // Run in single process (saves ~100MB)
+        '--disable-background-networking',
+        '--disable-default-apps',
+        '--disable-sync',
+        '--metrics-recording-only',
+        '--mute-audio',
+        '--no-default-browser-check',
+        '--disable-background-timer-throttling',
+        '--disable-backgrounding-occluded-windows',
+        '--disable-renderer-backgrounding',
+        '--window-size=1024,600',  // Smaller viewport = less memory
+        '--disable-features=IsolateOrigins,site-per-process'  // Reduce memory overhead
       ],
-      executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined
+      executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined,
+      timeout: 60000  // 60 second timeout for launch
     });
 
+    console.log(`✅ Puppeteer launched successfully`);
+    console.log(`📊 Memory after launch: ${Math.round(process.memoryUsage().heapUsed / 1024 / 1024)}MB`);
+
     const page = await browser.newPage();
-    await page.setViewport({ width: 1920, height: 1080 });
+    await page.setViewport({ width: 1024, height: 600 });  // Reduced viewport for memory savings
     await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
+    
+    // Phase 1: Block resource-heavy requests to save 40-60% memory
+    await page.setRequestInterception(true);
+    page.on('request', (request) => {
+      const resourceType = request.resourceType();
+      const blockedTypes = ['image', 'stylesheet', 'font', 'media'];
+      
+      if (blockedTypes.includes(resourceType)) {
+        request.abort();
+      } else {
+        request.continue();
+      }
+    });
+    
+    // Phase 2: Disable cache
+    await page.setCacheEnabled(false);
 
     // Loop through locations × keywords
     for (const keyword of keywords) {
       for (const [locationName, geoId] of Object.entries(locations)) {
+        // Phase 9: Safety - Check memory before each iteration
+        const currentMem = Math.round(process.memoryUsage().heapUsed / 1024 / 1024);
+        if (currentMem > 450) {
+          console.error(`❌ Memory limit reached (${currentMem}MB), stopping scrape`);
+          break; // Exit keyword loop
+        }
         try {
           console.log(`\n🔄 Scraping: "${keyword}" in ${locationName}...`);
           
           const url = buildLinkedInUrl(keyword, locationName, geoId, BULK_SCRAPE_CONFIG.timeFilter);
           console.log(`   URL: ${url}`);
           
+          // Phase 4: Optimized wait strategy - faster than networkidle2
           await page.goto(url, {
-            waitUntil: 'networkidle2',
+            waitUntil: 'domcontentloaded',
             timeout: 30000
           });
+          
+          // Wait specifically for what we need
+          await page.waitForSelector('ul.jobs-search__results-list', { timeout: 10000 });
+          
+          // Give dynamic content a moment to load
+          await new Promise(resolve => setTimeout(resolve, 2000));
 
           // Close popup if it appears
           try {
@@ -171,9 +232,6 @@ app.post('/bulk-scrape', validateApiSecret, async (req, res) => {
           } catch (error) {
             // No popup, continue
           }
-
-          // Wait for job listings
-          await page.waitForSelector('ul.jobs-search__results-list', { timeout: 10000 });
           
           // Extract job data (SUMMARY ONLY - no full details)
           const jobs = await page.evaluate(() => {
@@ -246,6 +304,15 @@ app.post('/bulk-scrape', validateApiSecret, async (req, res) => {
           });
 
           console.log(`   ✅ Scraped ${jobs.length} jobs`);
+          
+          // Phase 8: Memory monitoring
+          const memUsage = Math.round(process.memoryUsage().heapUsed / 1024 / 1024);
+          console.log(`   📊 Memory: ${memUsage}MB`);
+          
+          // Warn if approaching limits
+          if (memUsage > 400) {
+            console.warn(`   ⚠️ High memory usage: ${memUsage}MB`);
+          }
 
           // Add metadata to each job
           const jobsWithMetadata = jobs.map(job => ({
@@ -270,13 +337,36 @@ app.post('/bulk-scrape', validateApiSecret, async (req, res) => {
               console.log(`   ✅ Inserted: ${ingestResult?.inserted || 0}`);
             } catch (ingestError) {
               console.error(`   ❌ Failed to ingest jobs for ${locationName}: ${ingestError.message}`);
+              // Phase 6: Error array management - limit error detail size
               errors.push({
                 keyword,
                 location: locationName,
                 type: 'ingest',
-                error: ingestError.message
+                error: ingestError.message.substring(0, 200) // Limit error message length
               });
+              
+              // Limit total errors stored
+              if (errors.length > 50) {
+                errors.shift(); // Remove oldest error
+              }
             }
+          }
+          
+          // Phase 3: DOM & Storage cleanup between locations
+          try {
+            await page.evaluate(() => {
+              // Clear storage
+              sessionStorage.clear();
+              localStorage.clear();
+              
+              // Clear DOM (keep minimal structure)
+              document.body.innerHTML = '';
+            });
+            
+            // Navigate to blank page to fully reset
+            await page.goto('about:blank', { waitUntil: 'domcontentloaded', timeout: 5000 });
+          } catch (cleanupError) {
+            console.warn('⚠️ Cleanup warning:', cleanupError.message);
           }
 
           // Delay between requests to avoid rate limiting
@@ -290,6 +380,12 @@ app.post('/bulk-scrape', validateApiSecret, async (req, res) => {
             error: error.message
           });
         }
+      }
+      
+      // Phase 7: Force garbage collection between keywords
+      if (global.gc) {
+        global.gc();
+        console.log(`🧹 GC after keyword "${keyword}"`);
       }
     }
 
@@ -306,13 +402,18 @@ app.post('/bulk-scrape', validateApiSecret, async (req, res) => {
     });
 
   } catch (error) {
+    const memoryUsage = Math.round(process.memoryUsage().heapUsed / 1024 / 1024);
     console.error('❌ Bulk scraping error:', error.message);
+    console.error(`📊 Memory at crash: ${memoryUsage}MB`);
     
-    // Send Telegram error alert
-    const errorInfo = `Keywords: ${JSON.stringify(keywords)}\nLocations: ${JSON.stringify(locationIds || Object.keys(locations))}`;
+    // Enhanced error context for debugging
+    const errorContext = error.message.includes('launch') 
+      ? `Browser launch failed (Memory: ${memoryUsage}MB)`
+      : `/bulk-scrape endpoint - Keywords: ${JSON.stringify(keywords)}, Locations: ${JSON.stringify(locationIds || Object.keys(locations))}`;
+    
     await sendErrorAlert(
-      `/bulk-scrape endpoint - ${errorInfo}`,
-      `${error.message}\n\nStack: ${error.stack?.substring(0, 500)}`
+      errorContext,
+      `${error.message}\n\nMemory: ${memoryUsage}MB\n\nStack: ${error.stack?.substring(0, 500)}`
     );
     
     res.status(500).json({
