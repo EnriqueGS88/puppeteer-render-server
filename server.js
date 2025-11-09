@@ -1,3 +1,7 @@
+// Post scraped data after every iteration
+
+
+
 import express from 'express';
 import puppeteer from 'puppeteer';
 
@@ -40,8 +44,8 @@ function validateApiSecret(req, res, next) {
 // ============================================================================
 
 const BULK_SCRAPE_CONFIG = {
-  // timeFilter: "r24800", // Past 24h
-  timeFilter: "r7200", // Past 2h
+  timeFilter: "r24800", // Past 24h
+  // timeFilter: "r7200", // Past 2h
   baseUrl: "https://www.linkedin.com/jobs/search/"
 };
 
@@ -163,8 +167,7 @@ app.post('/bulk-scrape', validateApiSecret, async (req, res) => {
         '--disable-background-timer-throttling',
         '--disable-backgrounding-occluded-windows',
         '--disable-renderer-backgrounding',
-        '--window-size=1024,600',  // Smaller viewport = less memory
-        '--disable-features=IsolateOrigins,site-per-process'  // Reduce memory overhead
+        '--window-size=1280,720'  // Smaller viewport = less memory
       ],
       executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined,
       timeout: 60000  // 60 second timeout for launch
@@ -174,25 +177,18 @@ app.post('/bulk-scrape', validateApiSecret, async (req, res) => {
     console.log(`📊 Memory after launch: ${Math.round(process.memoryUsage().heapUsed / 1024 / 1024)}MB`);
 
     const page = await browser.newPage();
-    await page.setViewport({ width: 1024, height: 600 });  // Reduced viewport for memory savings
+    await page.setViewport({ width: 1280, height: 720 });  // Match new window size
     await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
 
     // Loop through locations × keywords
     for (const keyword of keywords) {
       for (const [locationName, geoId] of Object.entries(locations)) {
-        // Phase 9: Safety - Check memory before each iteration
-        const currentMem = Math.round(process.memoryUsage().heapUsed / 1024 / 1024);
-        if (currentMem > 450) {
-          console.error(`❌ Memory limit reached (${currentMem}MB), stopping scrape`);
-          break; // Exit keyword loop
-        }
         try {
           console.log(`\n🔄 Scraping: "${keyword}" in ${locationName}...`);
           
           const url = buildLinkedInUrl(keyword, locationName, geoId, BULK_SCRAPE_CONFIG.timeFilter);
           console.log(`   URL: ${url}`);
           
-          // Navigate to the LinkedIn URL
           await page.goto(url, {
             waitUntil: 'networkidle2',
             timeout: 30000
@@ -208,6 +204,9 @@ app.post('/bulk-scrape', validateApiSecret, async (req, res) => {
           } catch (error) {
             // No popup, continue
           }
+
+          // Wait for job listings
+          await page.waitForSelector('ul.jobs-search__results-list', { timeout: 10000 });
           
           // Extract job data (SUMMARY ONLY - no full details)
           const jobs = await page.evaluate(() => {
@@ -280,15 +279,6 @@ app.post('/bulk-scrape', validateApiSecret, async (req, res) => {
           });
 
           console.log(`   ✅ Scraped ${jobs.length} jobs`);
-          
-          // Phase 8: Memory monitoring
-          const memUsage = Math.round(process.memoryUsage().heapUsed / 1024 / 1024);
-          console.log(`   📊 Memory: ${memUsage}MB`);
-          
-          // Warn if approaching limits
-          if (memUsage > 400) {
-            console.warn(`   ⚠️ High memory usage: ${memUsage}MB`);
-          }
 
           // Add metadata to each job
           const jobsWithMetadata = jobs.map(job => ({
@@ -313,18 +303,12 @@ app.post('/bulk-scrape', validateApiSecret, async (req, res) => {
               console.log(`   ✅ Inserted: ${ingestResult?.inserted || 0}`);
             } catch (ingestError) {
               console.error(`   ❌ Failed to ingest jobs for ${locationName}: ${ingestError.message}`);
-              // Phase 6: Error array management - limit error detail size
               errors.push({
                 keyword,
                 location: locationName,
                 type: 'ingest',
-                error: ingestError.message.substring(0, 200) // Limit error message length
+                error: ingestError.message
               });
-              
-              // Limit total errors stored
-              if (errors.length > 50) {
-                errors.shift(); // Remove oldest error
-              }
             }
           }
 
@@ -339,12 +323,6 @@ app.post('/bulk-scrape', validateApiSecret, async (req, res) => {
             error: error.message
           });
         }
-      }
-      
-      // Phase 7: Force garbage collection between keywords
-      if (global.gc) {
-        global.gc();
-        console.log(`🧹 GC after keyword "${keyword}"`);
       }
     }
 
