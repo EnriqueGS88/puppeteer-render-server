@@ -210,17 +210,11 @@ app.post('/bulk-scrape', validateApiSecret, async (req, res) => {
           const url = buildLinkedInUrl(keyword, locationName, geoId, BULK_SCRAPE_CONFIG.timeFilter);
           console.log(`   URL: ${url}`);
           
-          // Phase 4: Optimized wait strategy - faster than networkidle2
+          // Navigate to the LinkedIn URL
           await page.goto(url, {
-            waitUntil: 'domcontentloaded',
+            waitUntil: 'networkidle2',
             timeout: 30000
           });
-          
-          // Wait specifically for what we need
-          await page.waitForSelector('ul.jobs-search__results-list', { timeout: 10000 });
-          
-          // Give dynamic content a moment to load
-          await new Promise(resolve => setTimeout(resolve, 2000));
 
           // Close popup if it appears
           try {
@@ -350,23 +344,6 @@ app.post('/bulk-scrape', validateApiSecret, async (req, res) => {
                 errors.shift(); // Remove oldest error
               }
             }
-          }
-          
-          // Phase 3: DOM & Storage cleanup between locations
-          try {
-            await page.evaluate(() => {
-              // Clear storage
-              sessionStorage.clear();
-              localStorage.clear();
-              
-              // Clear DOM (keep minimal structure)
-              document.body.innerHTML = '';
-            });
-            
-            // Navigate to blank page to fully reset
-            await page.goto('about:blank', { waitUntil: 'domcontentloaded', timeout: 5000 });
-          } catch (cleanupError) {
-            console.warn('⚠️ Cleanup warning:', cleanupError.message);
           }
 
           // Delay between requests to avoid rate limiting
