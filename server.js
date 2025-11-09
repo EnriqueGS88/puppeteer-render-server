@@ -184,7 +184,7 @@ app.post('/bulk-scrape', validateApiSecret, async (req, res) => {
     await page.setRequestInterception(true);
     page.on('request', (request) => {
       const resourceType = request.resourceType();
-      const blockedTypes = ['image', 'stylesheet', 'font', 'media'];
+      const blockedTypes = ['image', 'media'];
       
       if (blockedTypes.includes(resourceType)) {
         request.abort();
