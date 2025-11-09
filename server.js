@@ -190,24 +190,8 @@ app.post('/bulk-scrape', validateApiSecret, async (req, res) => {
         '--no-sandbox',
         '--disable-setuid-sandbox',
         '--disable-dev-shm-usage',
-        '--disable-accelerated-2d-canvas',
         '--disable-gpu',
-        '--disable-software-rasterizer',
-        '--disable-dev-tools',
-        '--disable-extensions',
-        '--no-first-run',
-        '--no-zygote',  // Critical for low memory
-        '--single-process',  // Run in single process (saves ~100MB)
-        '--disable-background-networking',
-        '--disable-default-apps',
-        '--disable-sync',
-        '--metrics-recording-only',
-        '--mute-audio',
-        '--no-default-browser-check',
-        '--disable-background-timer-throttling',
-        '--disable-backgrounding-occluded-windows',
-        '--disable-renderer-backgrounding',
-        '--window-size=1280,720'  // Smaller viewport = less memory
+        '--window-size=1280,720'
       ],
       executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined,
       timeout: 60000  // 60 second timeout for launch
@@ -216,7 +200,7 @@ app.post('/bulk-scrape', validateApiSecret, async (req, res) => {
     console.log(`✅ Puppeteer launched successfully`);
     console.log(`📊 Memory after launch: ${Math.round(process.memoryUsage().heapUsed / 1024 / 1024)}MB`);
 
-    const page = await browser.newPage();
+    let page = await browser.newPage();
     await page.setViewport({ width: 1280, height: 720 });  // Match new window size
     await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
 
@@ -226,6 +210,27 @@ app.post('/bulk-scrape', validateApiSecret, async (req, res) => {
         const startTime = Date.now();
         let url = '';  // Declare outside try block for error handler access
         try {
+          // Ensure we have a live browser and page before each iteration
+          if (!browser.isConnected()) {
+            console.warn('⚠️ Browser disconnected detected before iteration - relaunching...');
+            try { await browser.close().catch(() => {}); } catch {}
+            browser = await puppeteer.launch({
+              headless: true,
+              args: [
+                '--no-sandbox',
+                '--disable-setuid-sandbox',
+                '--disable-dev-shm-usage',
+                '--disable-gpu',
+                '--window-size=1280,720'
+              ],
+              executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined,
+              timeout: 60000
+            });
+            page = await browser.newPage();
+            await page.setViewport({ width: 1280, height: 720 });
+            await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
+          }
+
           console.log(`\n🔄 [${new Date().toISOString()}] Scraping: "${keyword}" in ${locationName}...`);
           
           url = buildLinkedInUrl(keyword, locationName, geoId, BULK_SCRAPE_CONFIG.timeFilter);
@@ -284,8 +289,8 @@ app.post('/bulk-scrape', validateApiSecret, async (req, res) => {
           }
 
           // Wait for job listings - multi-stage approach
-          // Stage 1: Wait for main container
-          await page.waitForSelector('main.jobs-search__results-list', { 
+          // Stage 1: Wait for main results list container
+          await page.waitForSelector('ul.jobs-search__results-list', { 
             timeout: 8000,
             visible: true 
           });
@@ -464,6 +469,32 @@ app.post('/bulk-scrape', validateApiSecret, async (req, res) => {
             timestamp: new Date().toISOString(),
             duration: `${duration}s`
           });
+
+          // If the browser disconnected or target closed, proactively relaunch for next iterations
+          if (browserState === 'disconnected' || /Target closed|detached Frame/i.test(error.message)) {
+            console.warn('♻️ Recovering from browser crash/disconnect...');
+            try { await browser.close().catch(() => {}); } catch {}
+            try {
+              browser = await puppeteer.launch({
+                headless: true,
+                args: [
+                  '--no-sandbox',
+                  '--disable-setuid-sandbox',
+                  '--disable-dev-shm-usage',
+                  '--disable-gpu',
+                  '--window-size=1280,720'
+                ],
+                executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined,
+                timeout: 60000
+              });
+              page = await browser.newPage();
+              await page.setViewport({ width: 1280, height: 720 });
+              await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
+              console.log('✅ Browser relaunched successfully');
+            } catch (relaunchError) {
+              console.error('❌ Failed to relaunch browser:', relaunchError.message);
+            }
+          }
         }
         
         // 🔥 CRITICAL: Delay AFTER both success AND error (outside try-catch)
@@ -495,7 +526,7 @@ app.post('/bulk-scrape', validateApiSecret, async (req, res) => {
     // Enhanced error context for debugging
     const errorContext = error.message.includes('launch') 
       ? `Browser launch failed (Memory: ${memoryUsage}MB)`
-      : `/bulk-scrape endpoint - Keywords: ${JSON.stringify(keywords)}, Locations: ${JSON.stringify(locationIds || Object.keys(locations))}`;
+      : `/bulk-scrape endpoint - Keywords: ${JSON.stringify(keywords)}, Locations: ${JSON.stringify(Object.keys(locations || {}))}`;
     
     await sendErrorAlert(
       errorContext,
