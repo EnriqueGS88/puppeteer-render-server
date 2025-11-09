@@ -1,5 +1,4 @@
-// Screenshots for debugging
-// Post to Supabase after each location
+// added debugging screenshotsand delays
 
 import express from 'express';
 import puppeteer from 'puppeteer';
@@ -43,7 +42,7 @@ function validateApiSecret(req, res, next) {
 // ============================================================================
 
 const BULK_SCRAPE_CONFIG = {
-  timeFilter: "r24800", // Past 7 days
+  timeFilter: "r86400", // Past 24 hours
   baseUrl: "https://www.linkedin.com/jobs/search/"
 };
 
@@ -54,8 +53,20 @@ const BULK_SCRAPE_CONFIG = {
 // Take screenshot and save to /tmp
 async function takeScreenshot(page, filename, description) {
   try {
+    // Pre-flight checks
+    if (!page || page.isClosed()) {
+      console.warn(`⚠️ Cannot screenshot ${description} - page is closed`);
+      return null;
+    }
+    
     const path = `/tmp/${filename}`;
-    await page.screenshot({ path, fullPage: false });
+    const screenshotOptions = {
+      path,
+      fullPage: false,
+      timeout: 5000
+    };
+    
+    await page.screenshot(screenshotOptions);
     console.log(`📸 Screenshot saved: ${description} -> ${filename}`);
     return filename;
   } catch (error) {
@@ -214,18 +225,28 @@ app.post('/bulk-scrape', validateApiSecret, async (req, res) => {
     // Loop through locations × keywords
     for (const keyword of keywords) {
       for (const [locationName, geoId] of Object.entries(locations)) {
+        const startTime = Date.now();
         try {
-          console.log(`\n🔄 Scraping: "${keyword}" in ${locationName}...`);
+          console.log(`\n🔄 [${new Date().toISOString()}] Scraping: "${keyword}" in ${locationName}...`);
           
           const url = buildLinkedInUrl(keyword, locationName, geoId, BULK_SCRAPE_CONFIG.timeFilter);
           console.log(`   URL: ${url}`);
           
           await page.goto(url, {
-            waitUntil: 'networkidle2',
-            timeout: 30000
+            waitUntil: 'domcontentloaded',
+            timeout: 20000
           });
 
-          // Screenshot 1: Initial page load
+          // Let page stabilize - use standard Promise-based delay
+          await new Promise(resolve => setTimeout(resolve, 2000));
+
+          // Validate we're still on the correct page
+          const currentUrl = page.url();
+          if (!currentUrl.includes('linkedin.com/jobs/search')) {
+            throw new Error(`Redirected away from jobs page to: ${currentUrl}`);
+          }
+
+          // Screenshot 1: Initial page load (after stability wait)
           const timestamp = Date.now();
           const screenshotFilename = await takeScreenshot(
             page, 
@@ -245,16 +266,36 @@ app.post('/bulk-scrape', validateApiSecret, async (req, res) => {
             // No popup, continue
           }
 
-          // Wait for job listings
-          await page.waitForSelector('ul.jobs-search__results-list', { timeout: 10000 });
+          // Wait for job listings - multi-stage approach
+          // Stage 1: Wait for main container
+          await page.waitForSelector('main.jobs-search__results-list', { 
+            timeout: 8000,
+            visible: true 
+          });
+
+          // Stage 2: Wait for actual job cards
+          const jobListExists = await page.waitForSelector(
+            'ul.jobs-search__results-list li.jobs-search-results__list-item',
+            { timeout: 5000, visible: true }
+          ).catch(() => null);
+
+          if (!jobListExists) {
+            // Take screenshot of "no results" state
+            if (!page.isClosed()) {
+              await takeScreenshot(page, `${keyword.replace(/\s+/g, '-')}-${locationName.replace(/\s+/g, '-')}-no-results-${Date.now()}.png`, 'No jobs found');
+            }
+            throw new Error('No job listings found on page');
+          }
           
           // Screenshot 2: Before scraping
-          const preScapeFilename = await takeScreenshot(
-            page,
-            `${keyword.replace(/\s+/g, '-')}-${locationName.replace(/\s+/g, '-')}-pre-scrape-${timestamp}.png`,
-            'Before scraping job data'
-          );
-          if (preScapeFilename) screenshots.push(preScapeFilename);
+          if (!page.isClosed()) {
+            const preScapeFilename = await takeScreenshot(
+              page,
+              `${keyword.replace(/\s+/g, '-')}-${locationName.replace(/\s+/g, '-')}-pre-scrape-${timestamp}.png`,
+              'Before scraping job data'
+            );
+            if (preScapeFilename) screenshots.push(preScapeFilename);
+          }
           
           // Extract job data (SUMMARY ONLY - no full details)
           const jobs = await page.evaluate(() => {
@@ -326,7 +367,8 @@ app.post('/bulk-scrape', validateApiSecret, async (req, res) => {
             }
           });
 
-          console.log(`   ✅ Scraped ${jobs.length} jobs`);
+          const duration = ((Date.now() - startTime) / 1000).toFixed(1);
+          console.log(`   ✅ Scraped ${jobs.length} jobs in ${duration}s`);
 
           // Add metadata to each job
           const jobsWithMetadata = jobs.map(job => ({
@@ -360,31 +402,41 @@ app.post('/bulk-scrape', validateApiSecret, async (req, res) => {
             }
           }
 
-          // Delay between requests to avoid rate limiting
-          await new Promise(resolve => setTimeout(resolve, 5000));
-
         } catch (error) {
-          console.error(`❌ Error scraping "${keyword}" in ${locationName}:`, error.message);
+          const duration = ((Date.now() - startTime) / 1000).toFixed(1);
+          console.error(`❌ [${new Date().toISOString()}] Error after ${duration}s scraping "${keyword}" in ${locationName}:`, error.message);
           
-          // Screenshot 3: Error state
+          // Enhanced error screenshot with guards
           try {
-            const errorTimestamp = Date.now();
-            const errorScreenshot = await takeScreenshot(
-              page,
-              `${keyword.replace(/\s+/g, '-')}-${locationName.replace(/\s+/g, '-')}-ERROR-${errorTimestamp}.png`,
-              'Error state'
-            );
-            if (errorScreenshot) screenshots.push(errorScreenshot);
+            if (page && !page.isClosed() && browser.isConnected()) {
+              const errorTimestamp = Date.now();
+              const errorScreenshot = await takeScreenshot(
+                page,
+                `${keyword.replace(/\s+/g, '-')}-${locationName.replace(/\s+/g, '-')}-ERROR-${errorTimestamp}.png`,
+                `Error: ${error.message}`
+              );
+              if (errorScreenshot) screenshots.push(errorScreenshot);
+            } else {
+              console.warn('⚠️ Cannot take error screenshot - page/browser is closed');
+            }
           } catch (screenshotError) {
-            console.warn('Failed to take error screenshot:', screenshotError.message);
+            console.warn('⚠️ Screenshot failed:', screenshotError.message);
           }
           
           errors.push({
             keyword,
             location: locationName,
-            error: error.message
+            error: error.message,
+            url: url,
+            timestamp: new Date().toISOString(),
+            duration: `${duration}s`
           });
         }
+        
+        // 🔥 CRITICAL: Delay AFTER both success AND error (outside try-catch)
+        const randomDelay = 2000 + Math.random() * 3000;  // 2-5 seconds
+        console.log(`⏳ Waiting ${Math.round(randomDelay/1000)}s before next location...`);
+        await new Promise(resolve => setTimeout(resolve, randomDelay));
       }
     }
 
