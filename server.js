@@ -43,7 +43,8 @@ function validateApiSecret(req, res, next) {
 // ============================================================================
 
 const BULK_SCRAPE_CONFIG = {
-  timeFilter: "r7200", // Past 7 days
+  // timeFilter: "r7200", // Past 2 hours
+  timeFilter: "r86400", // Past 24 hours
   baseUrl: "https://www.linkedin.com/jobs/search/"
 };
 
