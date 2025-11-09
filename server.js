@@ -1,6 +1,3 @@
-// Post scraped data after every iteration
-// Optimized to reduce memory usage
-
 import express from 'express';
 import puppeteer from 'puppeteer';
 
@@ -43,8 +40,8 @@ function validateApiSecret(req, res, next) {
 // ============================================================================
 
 const BULK_SCRAPE_CONFIG = {
-  // timeFilter: "r7200", // Past 2 hours
-  timeFilter: "r86400", // Past 24 hours
+  // timeFilter: "r24800", // Past 24h
+  timeFilter: "r7200", // Past 2h
   baseUrl: "https://www.linkedin.com/jobs/search/"
 };
 
@@ -179,22 +176,6 @@ app.post('/bulk-scrape', validateApiSecret, async (req, res) => {
     const page = await browser.newPage();
     await page.setViewport({ width: 1024, height: 600 });  // Reduced viewport for memory savings
     await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
-    
-    // Phase 1: Block resource-heavy requests to save 40-60% memory
-    await page.setRequestInterception(true);
-    page.on('request', (request) => {
-      const resourceType = request.resourceType();
-      const blockedTypes = ['image', 'media'];
-      
-      if (blockedTypes.includes(resourceType)) {
-        request.abort();
-      } else {
-        request.continue();
-      }
-    });
-    
-    // Phase 2: Disable cache
-    await page.setCacheEnabled(false);
 
     // Loop through locations × keywords
     for (const keyword of keywords) {
