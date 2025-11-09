@@ -1,6 +1,5 @@
-// Post scraped data after every iteration
-
-
+// Screenshots for debugging
+// Post to Supabase after each location
 
 import express from 'express';
 import puppeteer from 'puppeteer';
@@ -44,14 +43,26 @@ function validateApiSecret(req, res, next) {
 // ============================================================================
 
 const BULK_SCRAPE_CONFIG = {
-  timeFilter: "r24800", // Past 24h
-  // timeFilter: "r7200", // Past 2h
+  timeFilter: "r24800", // Past 7 days
   baseUrl: "https://www.linkedin.com/jobs/search/"
 };
 
 // ============================================================================
 // HELPER FUNCTIONS
 // ============================================================================
+
+// Take screenshot and save to /tmp
+async function takeScreenshot(page, filename, description) {
+  try {
+    const path = `/tmp/${filename}`;
+    await page.screenshot({ path, fullPage: false });
+    console.log(`📸 Screenshot saved: ${description} -> ${filename}`);
+    return filename;
+  } catch (error) {
+    console.warn(`⚠️ Screenshot failed for ${description}: ${error.message}`);
+    return null;
+  }
+}
 
 function transformJobUrl(jobUrl) {
   if (!jobUrl) return '';
@@ -99,6 +110,25 @@ app.get('/health', (req, res) => {
   });
 });
 
+// Screenshot retrieval endpoint
+app.get('/screenshots/:filename', validateApiSecret, (req, res) => {
+  const { filename } = req.params;
+  
+  // Validate filename to prevent directory traversal
+  if (!/^[a-zA-Z0-9_\-\.]+$/.test(filename)) {
+    return res.status(400).json({ error: 'Invalid filename' });
+  }
+  
+  const filepath = `/tmp/${filename}`;
+  
+  res.sendFile(filepath, (err) => {
+    if (err) {
+      console.error(`Failed to send screenshot ${filename}:`, err.message);
+      res.status(404).json({ error: 'Screenshot not found' });
+    }
+  });
+});
+
 // ============================================================================
 // BULK SCRAPE ENDPOINT
 // ============================================================================
@@ -131,6 +161,7 @@ app.post('/bulk-scrape', validateApiSecret, async (req, res) => {
   let totalScraped = 0;
   let totalInserted = 0;
   const errors = [];
+  const screenshots = []; // Track all screenshots taken
 
   try {
     console.log(`🚀 Launching Puppeteer for bulk scraping...`);
@@ -194,6 +225,15 @@ app.post('/bulk-scrape', validateApiSecret, async (req, res) => {
             timeout: 30000
           });
 
+          // Screenshot 1: Initial page load
+          const timestamp = Date.now();
+          const screenshotFilename = await takeScreenshot(
+            page, 
+            `${keyword.replace(/\s+/g, '-')}-${locationName.replace(/\s+/g, '-')}-initial-${timestamp}.png`,
+            'Initial page load'
+          );
+          if (screenshotFilename) screenshots.push(screenshotFilename);
+
           // Close popup if it appears
           try {
             const popupDismissButton = await page.waitForSelector('.contextual-sign-in-modal__modal-dismiss-icon', { timeout: 3000 });
@@ -207,6 +247,14 @@ app.post('/bulk-scrape', validateApiSecret, async (req, res) => {
 
           // Wait for job listings
           await page.waitForSelector('ul.jobs-search__results-list', { timeout: 10000 });
+          
+          // Screenshot 2: Before scraping
+          const preScapeFilename = await takeScreenshot(
+            page,
+            `${keyword.replace(/\s+/g, '-')}-${locationName.replace(/\s+/g, '-')}-pre-scrape-${timestamp}.png`,
+            'Before scraping job data'
+          );
+          if (preScapeFilename) screenshots.push(preScapeFilename);
           
           // Extract job data (SUMMARY ONLY - no full details)
           const jobs = await page.evaluate(() => {
@@ -317,6 +365,20 @@ app.post('/bulk-scrape', validateApiSecret, async (req, res) => {
 
         } catch (error) {
           console.error(`❌ Error scraping "${keyword}" in ${locationName}:`, error.message);
+          
+          // Screenshot 3: Error state
+          try {
+            const errorTimestamp = Date.now();
+            const errorScreenshot = await takeScreenshot(
+              page,
+              `${keyword.replace(/\s+/g, '-')}-${locationName.replace(/\s+/g, '-')}-ERROR-${errorTimestamp}.png`,
+              'Error state'
+            );
+            if (errorScreenshot) screenshots.push(errorScreenshot);
+          } catch (screenshotError) {
+            console.warn('Failed to take error screenshot:', screenshotError.message);
+          }
+          
           errors.push({
             keyword,
             location: locationName,
@@ -335,7 +397,9 @@ app.post('/bulk-scrape', validateApiSecret, async (req, res) => {
       success: true,
       total_scraped: totalScraped,
       inserted: totalInserted,
-      errors: errors.length > 0 ? errors : undefined
+      errors: errors.length > 0 ? errors : undefined,
+      screenshots: screenshots.length > 0 ? screenshots : undefined,
+      screenshot_url: screenshots.length > 0 ? `${req.protocol}://${req.get('host')}/screenshots/` : undefined
     });
 
   } catch (error) {
