@@ -1,5 +1,3 @@
-// added debugging screenshotsand delays
-
 import express from 'express';
 import puppeteer from 'puppeteer';
 
@@ -226,10 +224,11 @@ app.post('/bulk-scrape', validateApiSecret, async (req, res) => {
     for (const keyword of keywords) {
       for (const [locationName, geoId] of Object.entries(locations)) {
         const startTime = Date.now();
+        let url = '';  // Declare outside try block for error handler access
         try {
           console.log(`\n🔄 [${new Date().toISOString()}] Scraping: "${keyword}" in ${locationName}...`);
           
-          const url = buildLinkedInUrl(keyword, locationName, geoId, BULK_SCRAPE_CONFIG.timeFilter);
+          url = buildLinkedInUrl(keyword, locationName, geoId, BULK_SCRAPE_CONFIG.timeFilter);
           console.log(`   URL: ${url}`);
           
           await page.goto(url, {
@@ -237,8 +236,26 @@ app.post('/bulk-scrape', validateApiSecret, async (req, res) => {
             timeout: 20000
           });
 
+          // Screenshot IMMEDIATELY after navigation (before stability wait)
+          const immediateScreenshot = await takeScreenshot(
+            page,
+            `${keyword.replace(/\s+/g, '-')}-${locationName.replace(/\s+/g, '-')}-IMMEDIATE-${Date.now()}.png`,
+            'Immediate post-navigation'
+          );
+          if (immediateScreenshot) screenshots.push(immediateScreenshot);
+
           // Let page stabilize - use standard Promise-based delay
           await new Promise(resolve => setTimeout(resolve, 2000));
+
+          // Check if page session is still alive
+          if (page.isClosed()) {
+            throw new Error('Page closed during stability wait - possible bot detection');
+          }
+
+          // Check if browser is still connected
+          if (!browser.isConnected()) {
+            throw new Error('Browser disconnected during navigation');
+          }
 
           // Validate we're still on the correct page
           const currentUrl = page.url();
@@ -406,6 +423,20 @@ app.post('/bulk-scrape', validateApiSecret, async (req, res) => {
           const duration = ((Date.now() - startTime) / 1000).toFixed(1);
           console.error(`❌ [${new Date().toISOString()}] Error after ${duration}s scraping "${keyword}" in ${locationName}:`, error.message);
           
+          // Diagnostic information
+          let pageState = 'unknown';
+          let browserState = 'unknown';
+          
+          try {
+            pageState = page.isClosed() ? 'closed' : 'open';
+            browserState = browser.isConnected() ? 'connected' : 'disconnected';
+          } catch (e) {
+            pageState = 'error checking';
+            browserState = 'error checking';
+          }
+          
+          console.error(`   📊 Diagnostics: Page=${pageState}, Browser=${browserState}`);
+          
           // Enhanced error screenshot with guards
           try {
             if (page && !page.isClosed() && browser.isConnected()) {
@@ -417,7 +448,7 @@ app.post('/bulk-scrape', validateApiSecret, async (req, res) => {
               );
               if (errorScreenshot) screenshots.push(errorScreenshot);
             } else {
-              console.warn('⚠️ Cannot take error screenshot - page/browser is closed');
+              console.warn(`⚠️ Cannot take error screenshot - page=${pageState}, browser=${browserState}`);
             }
           } catch (screenshotError) {
             console.warn('⚠️ Screenshot failed:', screenshotError.message);
@@ -427,7 +458,9 @@ app.post('/bulk-scrape', validateApiSecret, async (req, res) => {
             keyword,
             location: locationName,
             error: error.message,
-            url: url,
+            url: url || 'not generated',
+            pageState,
+            browserState,
             timestamp: new Date().toISOString(),
             duration: `${duration}s`
           });
