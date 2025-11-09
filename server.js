@@ -295,11 +295,17 @@ app.post('/bulk-scrape', validateApiSecret, async (req, res) => {
             visible: true 
           });
 
+          console.log("job lists tested");
+
+
+
           // Stage 2: Wait for actual job cards
           const jobListExists = await page.waitForSelector(
             'ul.jobs-search__results-list li.jobs-search-results__list-item',
             { timeout: 5000, visible: true }
           ).catch(() => null);
+
+          console.log("job cards awaited");
 
           if (!jobListExists) {
             // Take screenshot of "no results" state
@@ -323,6 +329,9 @@ app.post('/bulk-scrape', validateApiSecret, async (req, res) => {
           const jobs = await page.evaluate(() => {
             const jobListings = [];
             const jobElements = document.querySelectorAll('ul.jobs-search__results-list li');
+
+            console.log('got node of jobs');
+            console.log('node of jobs: ', jobElements);
             
             jobElements.forEach((jobElement, index) => {
               try {
