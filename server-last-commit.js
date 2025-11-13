@@ -39,35 +39,9 @@ function validateApiSecret(req, res, next) {
 // BULK SCRAPING CONFIGURATION
 // ============================================================================
 
-// LinkedIn selectors (update here when LinkedIn changes their DOM)
-const SELECTORS = {
-  signInModal: '.contextual-sign-in-modal__modal-dismiss-icon',
-  jobListContainer: 'ul.jobs-search__results-list',
-  jobCard: 'ul.jobs-search__results-list li',
-  jobTitle: 'h3.base-search-card__title',
-  company: 'h4.base-search-card__subtitle',
-  location: 'span.job-search-card__location',
-  jobLink: 'a.base-card__full-link',
-  companyImage: 'img[data-ghost-classes="artdeco-entity-image--ghost"]',
-  postingDate: 'time.job-search-card__listdate--new'
-};
-
 const BULK_SCRAPE_CONFIG = {
-  timeFilter: "r28800", // Past 24 hours
-  baseUrl: "https://www.linkedin.com/jobs/search/",
-  userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-  viewport: { width: 1280, height: 720 },
-  timeouts: {
-    navigation: 20000,
-    jobList: 8000,
-    signInModal: 3000
-  },
-  delays: {
-    postNavigation: 2000,
-    pageStabilize: 3000,
-    signInDismiss: 1000,
-    zeroResultsExtra: 3000
-  }
+  timeFilter: "r86400", // Past 24 hours
+  baseUrl: "https://www.linkedin.com/jobs/search/"
 };
 
 // ============================================================================
@@ -122,81 +96,14 @@ function transformJobUrl(jobUrl) {
   }
 }
 
-function buildLinkedInUrl(keyword, geoId) {
+function buildLinkedInUrl(keyword, locationName, geoId, timeFilter) {
   const params = new URLSearchParams({
     keywords: keyword,
-    f_TPR: BULK_SCRAPE_CONFIG.timeFilter,
+    f_TPR: timeFilter,
     geoId: geoId.toString()
   });
+  
   return `${BULK_SCRAPE_CONFIG.baseUrl}?${params.toString()}`;
-}
-
-async function closeSignInModal(page) {
-  try {
-    const dismissButton = await page.waitForSelector(SELECTORS.signInModal, {
-      timeout: BULK_SCRAPE_CONFIG.timeouts.signInModal
-    });
-    if (dismissButton) {
-      await dismissButton.click();
-      await new Promise(resolve => setTimeout(resolve, BULK_SCRAPE_CONFIG.delays.signInDismiss));
-    }
-  } catch (_e) {
-    // No modal appeared, continue
-  }
-}
-
-async function extractJobs(page) {
-  return page.evaluate((selectors) => {
-    const jobListings = [];
-    const jobElements = document.querySelectorAll(selectors.jobCard);
-
-    jobElements.forEach((jobElement) => {
-      try {
-        const titleElement = jobElement.querySelector(selectors.jobTitle);
-        const jobTitle = titleElement ? titleElement.innerText.trim() : '';
-        const companyElement = jobElement.querySelector(selectors.company);
-        const company = companyElement ? companyElement.innerText.trim() : '';
-        const locationElement = jobElement.querySelector(selectors.location);
-        const location = locationElement ? locationElement.innerText.trim() : '';
-        const linkElement = jobElement.querySelector(selectors.jobLink);
-        const rawJobUrl = linkElement ? linkElement.href : '';
-        const imgElement = jobElement.querySelector(selectors.companyImage);
-        const imgUrl = imgElement ? imgElement.src : '';
-        const timeElement = jobElement.querySelector(selectors.postingDate);
-        const postingDate = timeElement ? timeElement.getAttribute('datetime') : '';
-        const postingTimeRelative = timeElement ? timeElement.innerText.trim() : '';
-
-        let jobId = '';
-        if (rawJobUrl) {
-          try {
-            const url = new URL(rawJobUrl);
-            const idFromPath = url.pathname.match(/\/jobs\/view\/.*?(\d+)/);
-            if (idFromPath && idFromPath[1]) {
-              jobId = idFromPath[1];
-            }
-          } catch (_e) {
-            const idMatch = rawJobUrl.match(/\/jobs\/view\/.*?(\d+)/);
-            if (idMatch) jobId = idMatch[1];
-          }
-        }
-
-        if (jobTitle && jobId) {
-          jobListings.push({
-            job_id: jobId,
-            job_title: jobTitle,
-            company,
-            location,
-            url: rawJobUrl,
-            img_url: imgUrl,
-            posting_date: postingDate,
-            posting_time_relative: postingTimeRelative
-          });
-        }
-      } catch (_err) {}
-    });
-
-    return jobListings;
-  }, SELECTORS);
 }
 
 // Health check endpoint
@@ -294,8 +201,8 @@ app.post('/bulk-scrape', validateApiSecret, async (req, res) => {
     console.log(`📊 Memory after launch: ${Math.round(process.memoryUsage().heapUsed / 1024 / 1024)}MB`);
 
     let page = await browser.newPage();
-    await page.setViewport(BULK_SCRAPE_CONFIG.viewport);
-    await page.setUserAgent(BULK_SCRAPE_CONFIG.userAgent);
+    await page.setViewport({ width: 1280, height: 720 });  // Match new window size
+    await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
 
     // Loop through locations × keywords
     for (const keyword of keywords) {
@@ -320,15 +227,19 @@ app.post('/bulk-scrape', validateApiSecret, async (req, res) => {
               timeout: 60000
             });
             page = await browser.newPage();
-            await page.setViewport(BULK_SCRAPE_CONFIG.viewport);
-            await page.setUserAgent(BULK_SCRAPE_CONFIG.userAgent);
+            await page.setViewport({ width: 1280, height: 720 });
+            await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
           }
 
           console.log(`\n🔄 [${new Date().toISOString()}] Scraping: "${keyword}" in ${locationName}...`);
-          url = buildLinkedInUrl(keyword, geoId);
+          
+          url = buildLinkedInUrl(keyword, locationName, geoId, BULK_SCRAPE_CONFIG.timeFilter);
           console.log(`   URL: ${url}`);
-
-          await page.goto(url, { waitUntil: 'domcontentloaded', timeout: BULK_SCRAPE_CONFIG.timeouts.navigation });
+          
+          await page.goto(url, {
+            waitUntil: 'domcontentloaded',
+            timeout: 20000
+          });
 
           // Screenshot IMMEDIATELY after navigation (before stability wait)
           const immediateScreenshot = await takeScreenshot(
@@ -338,16 +249,26 @@ app.post('/bulk-scrape', validateApiSecret, async (req, res) => {
           );
           if (immediateScreenshot) screenshots.push(immediateScreenshot);
 
-          await new Promise(resolve => setTimeout(resolve, BULK_SCRAPE_CONFIG.delays.postNavigation));
+          // Let page stabilize - use standard Promise-based delay
+          await new Promise(resolve => setTimeout(resolve, 2000));
 
-          if (page.isClosed()) throw new Error('Page closed during stability wait');
-          if (!browser.isConnected()) throw new Error('Browser disconnected during navigation');
+          // Check if page session is still alive
+          if (page.isClosed()) {
+            throw new Error('Page closed during stability wait - possible bot detection');
+          }
 
+          // Check if browser is still connected
+          if (!browser.isConnected()) {
+            throw new Error('Browser disconnected during navigation');
+          }
+
+          // Validate we're still on the correct page
           const currentUrl = page.url();
           if (!currentUrl.includes('linkedin.com/jobs/search')) {
             throw new Error(`Redirected away from jobs page to: ${currentUrl}`);
           }
 
+          // Screenshot 1: Initial page load (after stability wait)
           const timestamp = Date.now();
           const screenshotFilename = await takeScreenshot(
             page, 
@@ -356,43 +277,121 @@ app.post('/bulk-scrape', validateApiSecret, async (req, res) => {
           );
           if (screenshotFilename) screenshots.push(screenshotFilename);
 
-          await closeSignInModal(page);
-          await page.waitForSelector(SELECTORS.jobListContainer, {
-            timeout: BULK_SCRAPE_CONFIG.timeouts.jobList,
-            visible: true
-          });
-
-          console.log('⏳ Waiting for page to stabilize...');
-          await new Promise(resolve => setTimeout(resolve, BULK_SCRAPE_CONFIG.delays.pageStabilize));
-
-          const jobCardCount = await page.evaluate((selector) => {
-            return document.querySelectorAll(selector).length;
-          }, SELECTORS.jobCard);
-
-          console.log(`📊 Found ${jobCardCount} job card(s) in DOM`);
-
-          if (jobCardCount === 0) {
-            const noResultsScreenshot = await takeScreenshot(
-              page,
-              `${keyword.replace(/\s+/g, '-')}-${locationName.replace(/\s+/g, '-')}-no-results-${Date.now()}.png`,
-              'No jobs found'
-            );
-            if (noResultsScreenshot) screenshots.push(noResultsScreenshot);
-            await new Promise(resolve => setTimeout(resolve, BULK_SCRAPE_CONFIG.delays.zeroResultsExtra));
-            throw new Error('No job listings found on page');
+          // Close popup if it appears
+          try {
+            const popupDismissButton = await page.waitForSelector('.contextual-sign-in-modal__modal-dismiss-icon', { timeout: 3000 });
+            if (popupDismissButton) {
+              await popupDismissButton.click();
+              await new Promise(resolve => setTimeout(resolve, 1000));
+            }
+          } catch (error) {
+            // No popup, continue
           }
 
-          const preScapeFilename = await takeScreenshot(
-            page,
-            `${keyword.replace(/\s+/g, '-')}-${locationName.replace(/\s+/g, '-')}-pre-scrape-${timestamp}.png`,
-            'Before scraping job data'
-          );
-          if (preScapeFilename) screenshots.push(preScapeFilename);
+          // Wait for job listings - multi-stage approach
+          // Stage 1: Wait for main results list container
+          await page.waitForSelector('ul.jobs-search__results-list', { 
+            timeout: 8000,
+            visible: true 
+          });
 
-          console.log(`🔍 Extracting data from ${jobCardCount} job card(s)...`);
-          const jobs = await extractJobs(page);
-          console.log(`✅ Successfully extracted ${jobs.length} job(s) from ${jobCardCount} card(s)`);
+          console.log("job lists tested");
 
+
+
+          // Stage 2: Wait for actual job cards
+          const jobListExists = await page.waitForSelector(
+            'ul.jobs-search__results-list li.jobs-search-results__list-item',
+            { timeout: 5000, visible: true }
+          ).catch(() => null);
+
+          console.log("job cards awaited");
+
+          if (!jobListExists) {
+            // Take screenshot of "no results" state
+            if (!page.isClosed()) {
+              await takeScreenshot(page, `${keyword.replace(/\s+/g, '-')}-${locationName.replace(/\s+/g, '-')}-no-results-${Date.now()}.png`, 'No jobs found');
+            }
+            throw new Error('No job listings found on page');
+          }
+          
+          // Screenshot 2: Before scraping
+          if (!page.isClosed()) {
+            const preScapeFilename = await takeScreenshot(
+              page,
+              `${keyword.replace(/\s+/g, '-')}-${locationName.replace(/\s+/g, '-')}-pre-scrape-${timestamp}.png`,
+              'Before scraping job data'
+            );
+            if (preScapeFilename) screenshots.push(preScapeFilename);
+          }
+          
+          // Extract job data (SUMMARY ONLY - no full details)
+          const jobs = await page.evaluate(() => {
+            const jobListings = [];
+            const jobElements = document.querySelectorAll('ul.jobs-search__results-list li');
+
+            console.log('got node of jobs');
+            console.log('node of jobs: ', jobElements);
+            
+            jobElements.forEach((jobElement, index) => {
+              try {
+                const titleElement = jobElement.querySelector('h3.base-search-card__title');
+                const jobTitle = titleElement ? titleElement.innerText.trim() : '';
+
+                const companyElement = jobElement.querySelector('h4.base-search-card__subtitle');
+                const company = companyElement ? companyElement.innerText.trim() : '';
+
+                const locationElement = jobElement.querySelector('span.job-search-card__location');
+                const location = locationElement ? locationElement.innerText.trim() : '';
+
+                const linkElement = jobElement.querySelector('a.base-card__full-link');
+                const rawJobUrl = linkElement ? linkElement.href : '';
+                
+                const imgElement = jobElement.querySelector('img[data-ghost-classes="artdeco-entity-image--ghost"]');
+                const imgUrl = imgElement ? imgElement.src : '';
+                
+                const timeElement = jobElement.querySelector('time.job-search-card__listdate--new');
+                const postingDate = timeElement ? timeElement.getAttribute('datetime') : '';
+                const postingTimeRelative = timeElement ? timeElement.innerText.trim() : '';
+                
+                // Extract job ID from URL
+                let jobId = '';
+                if (rawJobUrl) {
+                  try {
+                    const url = new URL(rawJobUrl);
+                    const idFromPath = url.pathname.match(/\/jobs\/view\/.*?(\d+)/);
+                    if (idFromPath && idFromPath[1]) {
+                      jobId = idFromPath[1];
+                    }
+                  } catch (error) {
+                    const idMatch = rawJobUrl.match(/\/jobs\/view\/.*?(\d+)/);
+                    if (idMatch) {
+                      jobId = idMatch[1];
+                    }
+                  }
+                }
+                
+                if (jobTitle && jobId) {
+                  jobListings.push({
+                    job_id: jobId,
+                    job_title: jobTitle,
+                    company: company,
+                    location: location,
+                    url: rawJobUrl,
+                    img_url: imgUrl,
+                    posting_date: postingDate,
+                    posting_time_relative: postingTimeRelative
+                  });
+                }
+              } catch (error) {
+                console.error(`Error processing job ${index + 1}:`, error);
+              }
+            });
+            
+            return jobListings;
+          });
+
+          // Transform URLs
           jobs.forEach(job => {
             if (job.url) {
               job.url = transformJobUrl(job.url);
@@ -436,36 +435,46 @@ app.post('/bulk-scrape', validateApiSecret, async (req, res) => {
 
         } catch (error) {
           const duration = ((Date.now() - startTime) / 1000).toFixed(1);
+          console.error(`❌ [${new Date().toISOString()}] Error after ${duration}s scraping "${keyword}" in ${locationName}:`, error.message);
+          
+          // Diagnostic information
           let pageState = 'unknown';
           let browserState = 'unknown';
-
+          
           try {
-            pageState = page?.isClosed() ? 'closed' : 'open';
-            browserState = browser?.isConnected() ? 'connected' : 'disconnected';
-          } catch (_e) {
+            pageState = page.isClosed() ? 'closed' : 'open';
+            browserState = browser.isConnected() ? 'connected' : 'disconnected';
+          } catch (e) {
             pageState = 'error checking';
             browserState = 'error checking';
           }
-
-          console.error(`❌ [${new Date().toISOString()}] Error after ${duration}s scraping "${keyword}" in ${locationName}: ${error.message}`);
+          
           console.error(`   📊 Diagnostics: Page=${pageState}, Browser=${browserState}`);
-
+          
+          // Enhanced error screenshot with guards
           try {
-            if (page && !page.isClosed() && browser && browser.isConnected()) {
+            if (page && !page.isClosed() && browser.isConnected()) {
+              const errorTimestamp = Date.now();
               const errorScreenshot = await takeScreenshot(
                 page,
-                `${keyword.replace(/\s+/g, '-')}-${locationName.replace(/\s+/g, '-')}-ERROR-${Date.now()}.png`,
+                `${keyword.replace(/\s+/g, '-')}-${locationName.replace(/\s+/g, '-')}-ERROR-${errorTimestamp}.png`,
                 `Error: ${error.message}`
               );
               if (errorScreenshot) screenshots.push(errorScreenshot);
+            } else {
+              console.warn(`⚠️ Cannot take error screenshot - page=${pageState}, browser=${browserState}`);
             }
-          } catch (_se) {}
-
+          } catch (screenshotError) {
+            console.warn('⚠️ Screenshot failed:', screenshotError.message);
+          }
+          
           errors.push({
             keyword,
             location: locationName,
             error: error.message,
             url: url || 'not generated',
+            pageState,
+            browserState,
             timestamp: new Date().toISOString(),
             duration: `${duration}s`
           });
@@ -488,8 +497,8 @@ app.post('/bulk-scrape', validateApiSecret, async (req, res) => {
                 timeout: 60000
               });
               page = await browser.newPage();
-              await page.setViewport(BULK_SCRAPE_CONFIG.viewport);
-              await page.setUserAgent(BULK_SCRAPE_CONFIG.userAgent);
+              await page.setViewport({ width: 1280, height: 720 });
+              await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
               console.log('✅ Browser relaunched successfully');
             } catch (relaunchError) {
               console.error('❌ Failed to relaunch browser:', relaunchError.message);
@@ -497,7 +506,7 @@ app.post('/bulk-scrape', validateApiSecret, async (req, res) => {
           }
         }
         
-        // Delay AFTER both success AND error (outside try-catch)
+        // 🔥 CRITICAL: Delay AFTER both success AND error (outside try-catch)
         const randomDelay = 2000 + Math.random() * 3000;  // 2-5 seconds
         console.log(`⏳ Waiting ${Math.round(randomDelay/1000)}s before next location...`);
         await new Promise(resolve => setTimeout(resolve, randomDelay));
